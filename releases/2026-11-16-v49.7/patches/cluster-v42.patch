@@ -1,0 +1,1459 @@
+diff --git a/DirectRenderingCluster/src/android/car/cluster/ArdaDisplayProfile.java b/DirectRenderingCluster/src/android/car/cluster/ArdaDisplayProfile.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b354fbae795b95b0c39204cde2bb0c2509a2ffad
+--- /dev/null
++++ b/DirectRenderingCluster/src/android/car/cluster/ArdaDisplayProfile.java
+@@ -0,0 +1,37 @@
++package android.car.cluster;
++
++/** Port-keyed desired settings only: mode/rotation APIs require a separate validated backend. */
++public final class ArdaDisplayProfile {
++    public final int physicalPort;
++    public final boolean automaticMode;
++    public final int width;
++    public final int height;
++    public final int refreshHz;
++    public final int rotationDegrees;
++    public final int dpi;
++
++    public ArdaDisplayProfile(int physicalPort, boolean automaticMode, int width, int height,
++            int refreshHz, int rotationDegrees, int dpi) {
++        if (physicalPort != 0 && physicalPort != 1) {
++            throw new IllegalArgumentException("Only physical HDMI ports 0 and 1 supported");
++        }
++        if (!automaticMode && (width < 320 || height < 240 || width > 7680
++                || height > 4320 || refreshHz < 20 || refreshHz > 240)) {
++            throw new IllegalArgumentException("Invalid requested HDMI display mode");
++        }
++        if (rotationDegrees != 0 && rotationDegrees != 90
++                && rotationDegrees != 180 && rotationDegrees != 270) {
++            throw new IllegalArgumentException("Rotation must be 0/90/180/270");
++        }
++        if (dpi != 0 && (dpi < 80 || dpi > 640)) {
++            throw new IllegalArgumentException("DPI must be auto (0) or 80..640");
++        }
++        this.physicalPort = physicalPort;
++        this.automaticMode = automaticMode;
++        this.width = width;
++        this.height = height;
++        this.refreshHz = refreshHz;
++        this.rotationDegrees = rotationDegrees;
++        this.dpi = dpi;
++    }
++}
+diff --git a/DirectRenderingCluster/src/android/car/cluster/ArdaNavigationDisplayKeeper.java b/DirectRenderingCluster/src/android/car/cluster/ArdaNavigationDisplayKeeper.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c8982e64249e7ea3e0cc27b3db6be910f279fdc
+--- /dev/null
++++ b/DirectRenderingCluster/src/android/car/cluster/ArdaNavigationDisplayKeeper.java
+@@ -0,0 +1,290 @@
++package android.car.cluster;
++
++import android.graphics.PixelFormat;
++import android.graphics.Rect;
++import android.hardware.display.DisplayManager;
++import android.hardware.display.VirtualDisplay;
++import android.media.Image;
++import android.media.ImageReader;
++import android.os.Handler;
++import android.os.HandlerThread;
++import android.os.Looper;
++import android.os.SystemProperties;
++import android.util.Log;
++import android.view.Display;
++import android.view.Surface;
++
++/**
++ * Canary owner for the built-in AAOS navigation VirtualDisplay.
++ *
++ * The navigation tab is the foreground consumer. When its SurfaceView disappears,
++ * this class routes the *same* VirtualDisplay to an offscreen ImageReader so that
++ * setSurface(null) is not necessary. Frames are drained, NOT streamed or stored.
++ * It does not produce an H.264 feed, and it does not replace the independently
++ * owned ArdaProjectionSurface (future Android Auto CLUSTER viewport).
++ *
++ * Enabled only by MainClusterActivity's default-OFF system-property gate.
++ * All public methods are main-thread only.
++ */
++final class ArdaNavigationDisplayKeeper {
++    private static final String TAG = "ARDA.NavDisplayKeeper";
++    private static final String DISPLAY_NAME = "Cluster-App-VD";
++    private static final int DISPLAY_DPI = 160;  // Original NavigationFragment behavior.
++    private static final int IMAGE_BUFFERS = 3;
++
++    private final MainClusterActivity mActivity;
++    private final DisplayManager mDisplayManager;
++    private HandlerThread mDrainThread;
++    private Handler mDrainHandler;
++    private ImageReader mStandbyReader;
++    private VirtualDisplay mDisplay;
++    private Surface mForegroundSurface;
++    private int mWidth;
++    private int mHeight;
++    private boolean mReleased;
++    // Independent opt-in; V30 navigation keeper remains enabled by its own gate.
++    private final boolean mH264Requested = SystemProperties.getBoolean(
++            "persist.arda.cluster.nav_h264_tee", false);
++    private ArdaNavigationH264Tee mH264;
++    private boolean mH264Active;
++    private boolean mH264Failed;
++
++    ArdaNavigationDisplayKeeper(MainClusterActivity activity) {
++        requireMainThread();
++        mActivity = activity;
++        mDisplayManager = activity.getSystemService(DisplayManager.class);
++        if (mDisplayManager == null) {
++            throw new IllegalStateException("DisplayManager unavailable");
++        }
++    }
++
++    private static void requireMainThread() {
++        if (Looper.myLooper() != Looper.getMainLooper()) {
++            throw new IllegalStateException("Navigation display keeper requires main thread");
++        }
++    }
++
++    /** Attach the map tab's actual view surface; create its VirtualDisplay once. */
++    void attach(Surface surface, int width, int height, Rect unobscuredBounds) {
++        requireMainThread();
++        if (mReleased || surface == null || !surface.isValid() || width <= 0 || height <= 0) {
++            Log.w(TAG, "Ignored invalid foreground map surface");
++            return;
++        }
++        if (mDisplay == null) {
++            try {
++                createStandbyReader(width, height);
++                VirtualDisplay display = mDisplayManager.createVirtualDisplay(DISPLAY_NAME,
++                        width, height, DISPLAY_DPI, surface,
++                        DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY);
++                if (display == null || display.getDisplay() == null) {
++                    if (display != null) display.release();
++                    closeStandbyReader();
++                    Log.e(TAG, "Unable to create navigation virtual display");
++                    return;
++                }
++                mDisplay = display;
++                mWidth = width;
++                mHeight = height;
++                mForegroundSurface = surface;
++                int displayId = display.getDisplay().getDisplayId();
++                Log.i(TAG, "Canary map display ready id=" + displayId + " size="
++                        + width + "x" + height);
++                mActivity.updateNavDisplay(new MainClusterActivity.VirtualDisplay(
++                        displayId, new Rect(unobscuredBounds)));
++                startH264TeeIfRequested();
++            } catch (RuntimeException ex) {
++                Log.e(TAG, "Navigation virtual display creation failed", ex);
++                releaseDisplayResources();
++            }
++            return;
++        }
++
++        if (mH264Active && mH264 != null) {
++            if (width == mWidth && height == mHeight) {
++                mForegroundSurface = surface;
++                mH264.setPreviewSurface(surface);
++                Log.i(TAG, "Map tab attached to retained H264 tee");
++                return;
++            }
++            // Keep the physical cluster usable even if the tab changes geometry.
++            Log.w(TAG, "Map dimensions changed; fail back to V30 and disable H264 tee");
++            fallbackH264("MAP_SIZE_CHANGED");
++        }
++
++        // Do not relaunch the navigation app on every SurfaceView resize or tab change.
++        // The display identity is preserved while its output surface changes.
++        try {
++            if (width != mWidth || height != mHeight) {
++                ImageReader nextReader = newImageReader(width, height);
++                try {
++                    // Stop using the old standby reader *before* closing it.
++                    mDisplay.setSurface(surface);
++                    mForegroundSurface = surface;
++                    mDisplay.resize(width, height, DISPLAY_DPI);
++                    ImageReader previous = mStandbyReader;
++                    mStandbyReader = nextReader;
++                    mWidth = width;
++                    mHeight = height;
++                    if (previous != null) previous.close();
++                } catch (RuntimeException error) {
++                    nextReader.close();
++                    throw error;
++                }
++            } else {
++                mDisplay.setSurface(surface);
++                mForegroundSurface = surface;
++            }
++            Log.i(TAG, "Map tab attached to retained virtual display");
++        } catch (RuntimeException ex) {
++            Log.e(TAG, "Unable to attach map tab surface", ex);
++            // Leave the display alive if possible; do not break the physical cluster UI.
++            mForegroundSurface = null;
++            setStandbySurface();
++        }
++    }
++
++    /** Tab is hidden; keep the VirtualDisplay running against a draining Surface. */
++    void detach(Surface surface) {
++        requireMainThread();
++        if (mReleased || mDisplay == null || mForegroundSurface == null) return;
++        if (surface != null && mForegroundSurface != surface) return;
++        mForegroundSurface = null;
++        if (mH264Active && mH264 != null) {
++            mH264.setPreviewSurface(null);
++            Log.i(TAG, "Map hidden; H264 tee keeps map-only capture and encoder active");
++            return;
++        }
++        setStandbySurface();
++    }
++
++    private void setStandbySurface() {
++        if (mDisplay == null || mStandbyReader == null) return;
++        try {
++            mDisplay.setSurface(mStandbyReader.getSurface());
++            Log.i(TAG, "Map tab hidden; navigation display output moved to standby sink");
++        } catch (RuntimeException ex) {
++            Log.e(TAG, "Unable to switch navigation virtual display to standby", ex);
++        }
++    }
++
++    private void startH264TeeIfRequested() {
++        if (!mH264Requested || mH264 != null || mH264Failed || mReleased || mDisplay == null)
++            return;
++        mH264 = new ArdaNavigationH264Tee(mWidth, mHeight,
++                new ArdaNavigationH264Tee.Listener() {
++                    @Override
++                    public void onReady(Surface captureSurface) {
++                        if (mReleased || mH264 == null || mDisplay == null) return;
++                        try {
++                            // The same VirtualDisplay remains associated with the AAOS
++                            // navigation application; only its consumer changes.
++                            mDisplay.setSurface(captureSurface);
++                            mH264Active = true;
++                            mH264.setPreviewSurface(mForegroundSurface);
++                            Log.i(TAG, "Map-only H264 tee canary active");
++                        } catch (RuntimeException error) {
++                            Log.e(TAG, "Cannot attach map H264 tee", error);
++                            fallbackH264("ATTACH_FAILED");
++                        }
++                    }
++
++                    @Override
++                    public void onFailed(String detail) {
++                        if (!mReleased) fallbackH264(detail);
++                    }
++                });
++        mH264.start();
++    }
++
++    private void fallbackH264(String reason) {
++        requireMainThread();
++        mH264Failed = true;  // Avoid encoder restart storms during this Activity.
++        ArdaNavigationH264Tee old = mH264;
++        mH264 = null;
++        mH264Active = false;
++        if (mDisplay != null) {
++            try {
++                if (mForegroundSurface != null && mForegroundSurface.isValid()) {
++                    mDisplay.setSurface(mForegroundSurface);
++                } else if (mStandbyReader != null) {
++                    mDisplay.setSurface(mStandbyReader.getSurface());
++                }
++            } catch (RuntimeException error) {
++                Log.e(TAG, "H264 fallback Surface restore failed", error);
++            }
++        }
++        if (old != null) old.close();
++        Log.w(TAG, "Map-only H264 tee disabled; V30 route retained: " + reason);
++    }
++
++    private void createStandbyReader(int width, int height) {
++        if (mDrainThread == null) {
++            mDrainThread = new HandlerThread("ArdaNavStandbyDrain");
++            mDrainThread.start();
++            mDrainHandler = new Handler(mDrainThread.getLooper());
++        }
++        mStandbyReader = newImageReader(width, height);
++    }
++
++    private ImageReader newImageReader(int width, int height) {
++        ImageReader reader = ImageReader.newInstance(width, height,
++                PixelFormat.RGBA_8888, IMAGE_BUFFERS);
++        reader.setOnImageAvailableListener(source -> {
++            Image frame = null;
++            try {
++                frame = source.acquireLatestImage();
++            } catch (IllegalStateException ex) {
++                // A late callback can race with reader close on Activity teardown.
++                Log.w(TAG, "Standby image unavailable", ex);
++            } finally {
++                if (frame != null) frame.close();
++            }
++        }, mDrainHandler);
++        return reader;
++    }
++
++    private void closeStandbyReader() {
++        if (mStandbyReader != null) {
++            mStandbyReader.setOnImageAvailableListener(null, null);
++            mStandbyReader.close();
++            mStandbyReader = null;
++        }
++    }
++
++    private void releaseDisplayResources() {
++        if (mH264 != null) {
++            ArdaNavigationH264Tee old = mH264;
++            mH264 = null;
++            mH264Active = false;
++            if (mDisplay != null && mStandbyReader != null) {
++                try { mDisplay.setSurface(mStandbyReader.getSurface()); }
++                catch (RuntimeException ignored) { }
++            }
++            old.close();
++        }
++        mForegroundSurface = null;
++        if (mDisplay != null) {
++            try {
++                mDisplay.release();
++            } finally {
++                mDisplay = null;
++            }
++        }
++        closeStandbyReader();
++        mWidth = 0;
++        mHeight = 0;
++    }
++
++    void release() {
++        requireMainThread();
++        if (mReleased) return;
++        mReleased = true;
++        releaseDisplayResources();
++        if (mDrainThread != null) {
++            mDrainThread.quitSafely();
++            mDrainThread = null;
++            mDrainHandler = null;
++        }
++    }
++}
+diff --git a/DirectRenderingCluster/src/android/car/cluster/ArdaNavigationH264Tee.java b/DirectRenderingCluster/src/android/car/cluster/ArdaNavigationH264Tee.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..86cc497117a8f6384ea637a1a9263644e31ad689
+--- /dev/null
++++ b/DirectRenderingCluster/src/android/car/cluster/ArdaNavigationH264Tee.java
+@@ -0,0 +1,520 @@
++package android.car.cluster;
++
++import android.graphics.SurfaceTexture;
++import android.media.MediaCodec;
++import android.media.MediaCodecInfo;
++import android.media.MediaFormat;
++import android.opengl.EGL14;
++import android.opengl.EGLExt;
++import android.opengl.EGLConfig;
++import android.opengl.EGLContext;
++import android.opengl.EGLDisplay;
++import android.opengl.EGLSurface;
++import android.opengl.GLES11Ext;
++import android.opengl.GLES20;
++import android.os.Handler;
++import android.os.HandlerThread;
++import android.os.Looper;
++import android.util.Log;
++import android.view.Surface;
++
++import java.nio.ByteBuffer;
++import java.nio.ByteOrder;
++import java.nio.FloatBuffer;
++
++/**
++ * Default-OFF, map-only H.264 encoder source for DirectRenderingCluster.
++ *
++ * A VirtualDisplay produces into this class's SurfaceTexture. An EGL renderer
++ * fans that texture out to BOTH the local NavigationFragment SurfaceView and a
++ * MediaCodec input Surface. The VirtualDisplay is never tied to a tab Surface.
++ *
++ * This stage encodes H.264 but deliberately has NO network/IPC publisher.
++ * Packets are consumed locally for codec validation until the AAP transport is
++ * connected in a subsequent stage. Never route this output into MAIN.
++ *
++ * All EGL, SurfaceTexture and MediaCodec operations run on a dedicated thread.
++ */
++final class ArdaNavigationH264Tee {
++    interface Listener {
++        void onReady(Surface captureSurface);
++        void onFailed(String detail);
++    }
++
++    // Future transport sink. Intentionally unregistered in this source stage.
++    interface EncodedPacketSink {
++        void onPacket(byte[] data, long presentationTimeUs, int codecFlags);
++    }
++
++    private static final String TAG = "ARDA.NavH264Tee";
++    private static final String MIME = "video/avc";
++    private static final int FRAME_RATE = 15;
++    private static final int BITRATE = 900_000;
++    private static final int KEYFRAME_SECONDS = 2;
++    private static final int EGL_RECORDABLE_ANDROID = 0x3142;
++
++    private static final String VERTEX =
++            "attribute vec2 aPosition;\n" +
++            "attribute vec2 aTexCoord;\n" +
++            "uniform mat4 uTexMatrix;\n" +
++            "varying vec2 vTexCoord;\n" +
++            "void main() {\n" +
++            " gl_Position = vec4(aPosition, 0.0, 1.0);\n" +
++            " vTexCoord = (uTexMatrix * vec4(aTexCoord, 0.0, 1.0)).xy;\n" +
++            "}\n";
++    private static final String FRAGMENT =
++            "#extension GL_OES_EGL_image_external : require\n" +
++            "precision mediump float;\n" +
++            "varying vec2 vTexCoord;\n" +
++            "uniform samplerExternalOES uTexture;\n" +
++            "void main() { gl_FragColor = texture2D(uTexture, vTexCoord); }\n";
++    private static final float[] QUAD = {
++            -1f, -1f, 0f, 0f,
++             1f, -1f, 1f, 0f,
++            -1f,  1f, 0f, 1f,
++             1f,  1f, 1f, 1f,
++    };
++
++    private final Handler mMainHandler = new Handler(Looper.getMainLooper());
++    private final HandlerThread mWorkerThread = new HandlerThread("ArdaNavH264Egl");
++    private final int mWidth;
++    private final int mHeight;
++    private final int mEncodedWidth;
++    private final int mEncodedHeight;
++    private final Listener mListener;
++    private Handler mWorker;
++    private volatile boolean mClosed;
++    private boolean mStarted;
++
++    private EGLDisplay mEglDisplay = EGL14.EGL_NO_DISPLAY;
++    private EGLContext mEglContext = EGL14.EGL_NO_CONTEXT;
++    private EGLConfig mEglConfig;
++    private EGLSurface mPbuffer = EGL14.EGL_NO_SURFACE;
++    private EGLSurface mEncoderWindow = EGL14.EGL_NO_SURFACE;
++    private EGLSurface mPreviewWindow = EGL14.EGL_NO_SURFACE;
++    private Surface mPreviewSurface;
++    private MediaCodec mCodec;
++    private Surface mEncoderInput;
++    private SurfaceTexture mTexture;
++    private Surface mCaptureSurface;
++    private int mTextureId;
++    private int mProgram;
++    private int mPositionLocation;
++    private int mTexCoordLocation;
++    private int mTextureMatrixLocation;
++    private int mSamplerLocation;
++    private FloatBuffer mQuadBuffer;
++    private final float[] mTransform = new float[16];
++    private long mEncodedFrames;
++    private long mEncodedBytes;
++    private long mLastStatsNs;
++    private long mLastPtsNs;
++    private long mRenderedFrames;
++    private long mFrameCallbacks;
++    private long mLastEncodedPtsNs;
++    private boolean mFailureReported;
++    private Surface mRequestedPreview;
++    private int mPreviewGeneration;
++    private static final int PREVIEW_ATTEMPTS = 4;
++    private static final long HEARTBEAT_MS = 1000L;
++
++    ArdaNavigationH264Tee(int width, int height, Listener listener) {
++        if (width <= 0 || height <= 0 || listener == null) {
++            throw new IllegalArgumentException("Invalid H264 tee configuration");
++        }
++        mWidth = width;
++        mHeight = height;
++        // Prefer hardware/software encoder-friendly dimensions; render source
++        // into the unclipped WxH area and pad to the next 16-pixel boundary.
++        mEncodedWidth = ((width + 15) / 16) * 16;
++        mEncodedHeight = ((height + 15) / 16) * 16;
++        mListener = listener;
++    }
++
++    void start() {
++        if (mStarted || mClosed) return;
++        mStarted = true;
++        mWorkerThread.start();
++        mWorker = new Handler(mWorkerThread.getLooper());
++        mWorker.post(() -> {
++            if (mClosed) return;
++            try {
++                initialize();
++                if (mClosed) {
++                    teardown();
++                    return;
++                }
++                Surface input = mCaptureSurface;
++                mMainHandler.post(() -> {
++                    if (!mClosed) mListener.onReady(input);
++                });
++            } catch (Exception error) {
++                Log.e(TAG, "H264 tee init failed", error);
++                String detail = error.getClass().getSimpleName() + ": " + error.getMessage();
++                teardown();
++                mMainHandler.post(() -> {
++                    if (!mClosed) mListener.onFailed(detail);
++                });
++            }
++        });
++    }
++
++    void setPreviewSurface(Surface preview) {
++        Handler worker = mWorker;
++        if (mClosed || worker == null) return;
++        worker.post(() -> {
++            if (mClosed) return;
++            mRequestedPreview = preview != null && preview.isValid() ? preview : null;
++            int generation = ++mPreviewGeneration;
++            if (mRequestedPreview == null) {
++                clearPreview();
++            } else {
++                attachPreviewWithRetry(generation, 1);
++            }
++        });
++    }
++
++    void close() {
++        if (mClosed) return;
++        mClosed = true;
++        Handler worker = mWorker;
++        if (worker != null) {
++            worker.post(this::teardown);
++            mWorkerThread.quitSafely();
++        }
++    }
++
++    private void initialize() throws Exception {
++        mEglDisplay = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
++        if (mEglDisplay == EGL14.EGL_NO_DISPLAY) throw new IllegalStateException("EGL display");
++        int[] version = new int[2];
++        if (!EGL14.eglInitialize(mEglDisplay, version, 0, version, 1)) {
++            throw new IllegalStateException("EGL initialize");
++        }
++        int[] attrs = {
++                EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,
++                EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
++                EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
++                EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT | EGL14.EGL_PBUFFER_BIT,
++                EGL_RECORDABLE_ANDROID, 1, EGL14.EGL_NONE
++        };
++        EGLConfig[] configs = new EGLConfig[1];
++        int[] count = new int[1];
++        if (!EGL14.eglChooseConfig(mEglDisplay, attrs, 0, configs, 0, 1, count, 0)
++                || count[0] != 1) {
++            throw new IllegalStateException("No EGL recordable config");
++        }
++        mEglConfig = configs[0];
++        mEglContext = EGL14.eglCreateContext(mEglDisplay, mEglConfig, EGL14.EGL_NO_CONTEXT,
++                new int[]{EGL14.EGL_CONTEXT_CLIENT_VERSION, 2, EGL14.EGL_NONE}, 0);
++        if (mEglContext == EGL14.EGL_NO_CONTEXT) throw new IllegalStateException("EGL context");
++        mPbuffer = EGL14.eglCreatePbufferSurface(mEglDisplay, mEglConfig,
++                new int[]{EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE}, 0);
++        if (mPbuffer == EGL14.EGL_NO_SURFACE) throw new IllegalStateException("EGL pbuffer");
++        makeCurrent(mPbuffer);
++
++        int[] tex = new int[1];
++        GLES20.glGenTextures(1, tex, 0);
++        mTextureId = tex[0];
++        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, mTextureId);
++        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
++                GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
++        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
++                GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
++        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
++                GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
++        GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES,
++                GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
++        mProgram = makeProgram(VERTEX, FRAGMENT);
++        mPositionLocation = GLES20.glGetAttribLocation(mProgram, "aPosition");
++        mTexCoordLocation = GLES20.glGetAttribLocation(mProgram, "aTexCoord");
++        mTextureMatrixLocation = GLES20.glGetUniformLocation(mProgram, "uTexMatrix");
++        mSamplerLocation = GLES20.glGetUniformLocation(mProgram, "uTexture");
++        if (mPositionLocation < 0 || mTexCoordLocation < 0 || mTextureMatrixLocation < 0
++                || mSamplerLocation < 0) throw new IllegalStateException("GL shader locations");
++        mQuadBuffer = ByteBuffer.allocateDirect(QUAD.length * 4)
++                .order(ByteOrder.nativeOrder()).asFloatBuffer();
++        mQuadBuffer.put(QUAD).position(0);
++
++        MediaFormat format = MediaFormat.createVideoFormat(MIME, mEncodedWidth, mEncodedHeight);
++        format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
++                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
++        format.setInteger(MediaFormat.KEY_BIT_RATE, BITRATE);
++        format.setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE);
++        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, KEYFRAME_SECONDS);
++        mCodec = MediaCodec.createEncoderByType(MIME);
++        mCodec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
++        mEncoderInput = mCodec.createInputSurface();
++        mEncoderWindow = createWindow(mEncoderInput);
++        mCodec.start();
++
++        makeCurrent(mPbuffer);
++        mTexture = new SurfaceTexture(mTextureId);
++        mTexture.setDefaultBufferSize(mWidth, mHeight);
++        mCaptureSurface = new Surface(mTexture);
++        mTexture.setOnFrameAvailableListener(ignored -> renderFrame(), mWorker);
++        mLastStatsNs = System.nanoTime();
++        Log.i(TAG, "Map-only EGL/H264 tee READY source=" + mWidth + "x" + mHeight
++                + " codec=" + mEncodedWidth + "x" + mEncodedHeight
++                + " bitrate=" + BITRATE + " fps=" + FRAME_RATE);
++        // A static navigation frame may be encoded AFTER the initial non-blocking
++        // drain attempt. Drain codec output even with no additional map frames.
++        mWorker.postDelayed(this::heartbeat, HEARTBEAT_MS);
++    }
++
++    private EGLSurface createWindow(Surface surface) {
++        EGLSurface window = EGL14.eglCreateWindowSurface(mEglDisplay, mEglConfig,
++                surface, new int[]{EGL14.EGL_NONE}, 0);
++        if (window == EGL14.EGL_NO_SURFACE) {
++            throw new IllegalStateException("EGL window surface error=" + EGL14.eglGetError());
++        }
++        return window;
++    }
++
++    private void makeCurrent(EGLSurface window) {
++        if (!EGL14.eglMakeCurrent(mEglDisplay, window, window, mEglContext)) {
++            throw new IllegalStateException("EGL makeCurrent error=" + EGL14.eglGetError());
++        }
++    }
++
++    private void attachPreviewWithRetry(int generation, int attempt) {
++        if (mClosed || generation != mPreviewGeneration || mRequestedPreview == null) return;
++        if (!mRequestedPreview.isValid()) {
++            Log.w(TAG, "Preview invalidated before EGL attach; waiting for next tab Surface");
++            clearPreview();
++            return;
++        }
++        try {
++            replacePreview(mRequestedPreview);
++            Log.i(TAG, "Preview EGL attach PASS attempt=" + attempt);
++        } catch (RuntimeException error) {
++            clearPreview();
++            Log.w(TAG, "Preview EGL attach failed attempt=" + attempt + "/"
++                    + PREVIEW_ATTEMPTS, error);
++            if (attempt < PREVIEW_ATTEMPTS) {
++                mWorker.postDelayed(() -> attachPreviewWithRetry(generation, attempt + 1),
++                        250L * attempt);
++            } else {
++                // Never leave the physical HDMI2 map blank just to keep encoding.
++                // Restore the known-good direct navigation surface instead.
++                Log.e(TAG, "Preview attach exhausted; request V30 fallback");
++                mMainHandler.post(() -> {
++                    if (!mClosed) mListener.onFailed("PREVIEW_ATTACH_FAILED");
++                });
++            }
++        }
++    }
++
++    private void heartbeat() {
++        if (mClosed || mCodec == null || mFailureReported) return;
++        try {
++            drainCodec();
++            long now = System.nanoTime();
++            if (now - mLastStatsNs >= 5_000_000_000L) {
++                Log.i(TAG, "Map-only H264 statistics callbacks=" + mFrameCallbacks
++                        + " rendered=" + mRenderedFrames
++                        + " encodedFrames=" + mEncodedFrames
++                        + " encodedBytes=" + mEncodedBytes
++                        + " preview=" + (mPreviewWindow != EGL14.EGL_NO_SURFACE));
++                mLastStatsNs = now;
++            }
++        } catch (RuntimeException error) {
++            if (!mFailureReported) {
++                mFailureReported = true;
++                Log.e(TAG, "H264 tee periodic codec drain failed", error);
++                mMainHandler.post(() -> {
++                    if (!mClosed) mListener.onFailed("CODEC_DRAIN_FAILED");
++                });
++            }
++            return;
++        }
++        if (!mClosed) mWorker.postDelayed(this::heartbeat, HEARTBEAT_MS);
++    }
++
++    private void replacePreview(Surface preview) {
++        if (mPreviewSurface == preview) return;
++        clearPreview();
++        if (preview != null) {
++            mPreviewWindow = createWindow(preview);
++            mPreviewSurface = preview;
++        }
++    }
++
++    private void clearPreview() {
++        mPreviewSurface = null;
++        if (mPreviewWindow != EGL14.EGL_NO_SURFACE) {
++            makeCurrent(mPbuffer);
++            EGL14.eglDestroySurface(mEglDisplay, mPreviewWindow);
++            mPreviewWindow = EGL14.EGL_NO_SURFACE;
++        }
++    }
++
++    private void renderFrame() {
++        if (mClosed || mTexture == null || mCodec == null) return;
++        mFrameCallbacks++;
++        if (mFrameCallbacks == 1) Log.i(TAG, "First navigation capture frame received");
++        try {
++            makeCurrent(mPbuffer);
++            mTexture.updateTexImage();
++            mTexture.getTransformMatrix(mTransform);
++            long ptsNs = mTexture.getTimestamp();
++            if (ptsNs <= mLastPtsNs) ptsNs = mLastPtsNs + 1_000_000L;
++            mLastPtsNs = ptsNs;
++
++            // Throttle the encoder to 15 fps on Pi4. The local map preview may
++            // still be refreshed at the display's native rendering frequency.
++            if (mLastEncodedPtsNs == 0L
++                    || ptsNs - mLastEncodedPtsNs >= 1_000_000_000L / FRAME_RATE) {
++                if (!draw(mEncoderWindow, mEncodedWidth, mEncodedHeight, ptsNs, true)) {
++                    throw new IllegalStateException("Encoder EGL buffer swap failed");
++                }
++                mLastEncodedPtsNs = ptsNs;
++            }
++            if (mPreviewWindow != EGL14.EGL_NO_SURFACE) {
++                if (!draw(mPreviewWindow, mWidth, mHeight, ptsNs, false)) {
++                    Log.w(TAG, "Preview EGL buffer swap failed; releasing preview");
++                    clearPreview();
++                }
++            }
++            mRenderedFrames++;
++            drainCodec();
++        } catch (RuntimeException error) {
++            if (mFailureReported) return;
++            mFailureReported = true;
++            Log.e(TAG, "H264 tee runtime failure", error);
++            String detail = "RUN " + error.getClass().getSimpleName();
++            if (mTexture != null) mTexture.setOnFrameAvailableListener(null);
++            // Stop producing immediately; owner will return VirtualDisplay to
++            // its original, known-good SurfaceView/standby-reader route.
++            mMainHandler.post(() -> {
++                if (!mClosed) mListener.onFailed(detail);
++            });
++        }
++    }
++
++    private boolean draw(EGLSurface window, int width, int height, long ptsNs,
++            boolean encoder) {
++        makeCurrent(window);
++        GLES20.glViewport(0, 0, width, height);
++        GLES20.glClearColor(0f, 0f, 0f, 1f);
++        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
++        // Encoder surfaces are padded to 16 px: don't stretch the map into padding.
++        if (encoder) GLES20.glViewport(0, 0, mWidth, mHeight);
++        GLES20.glUseProgram(mProgram);
++        GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
++        GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, mTextureId);
++        GLES20.glUniform1i(mSamplerLocation, 0);
++        GLES20.glUniformMatrix4fv(mTextureMatrixLocation, 1, false, mTransform, 0);
++        mQuadBuffer.position(0);
++        GLES20.glVertexAttribPointer(mPositionLocation, 2, GLES20.GL_FLOAT,
++                false, 16, mQuadBuffer);
++        mQuadBuffer.position(2);
++        GLES20.glVertexAttribPointer(mTexCoordLocation, 2, GLES20.GL_FLOAT,
++                false, 16, mQuadBuffer);
++        GLES20.glEnableVertexAttribArray(mPositionLocation);
++        GLES20.glEnableVertexAttribArray(mTexCoordLocation);
++        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
++        GLES20.glDisableVertexAttribArray(mPositionLocation);
++        GLES20.glDisableVertexAttribArray(mTexCoordLocation);
++        if (encoder) EGLExt.eglPresentationTimeANDROID(mEglDisplay, window, ptsNs);
++        return EGL14.eglSwapBuffers(mEglDisplay, window);
++    }
++
++    private void drainCodec() {
++        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
++        while (true) {
++            int index = mCodec.dequeueOutputBuffer(info, 0);
++            if (index == MediaCodec.INFO_TRY_AGAIN_LATER) return;
++            if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
++                Log.i(TAG, "H264 output format=" + mCodec.getOutputFormat());
++                continue;
++            }
++            if (index < 0) return;
++            if (info.size > 0) {
++                ByteBuffer encoded = mCodec.getOutputBuffer(index);
++                if (encoded != null) {
++                    // A future authenticated AAP transport will consume encoded
++                    // ByteBuffer packets here, with correct CSD/PTS/flags.
++                    mEncodedBytes += info.size;
++                    if ((info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
++                        mEncodedFrames++;
++                        if (mEncodedFrames == 1) {
++                            Log.i(TAG, "First H264 encoded frame received ptsUs="
++                                    + info.presentationTimeUs + " size=" + info.size);
++                        }
++                    }
++                }
++            }
++            mCodec.releaseOutputBuffer(index, false);
++        }
++    }
++
++    private static int compileShader(int type, String source) {
++        int shader = GLES20.glCreateShader(type);
++        GLES20.glShaderSource(shader, source);
++        GLES20.glCompileShader(shader);
++        int[] status = new int[1];
++        GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, status, 0);
++        if (status[0] == 0) {
++            String reason = GLES20.glGetShaderInfoLog(shader);
++            GLES20.glDeleteShader(shader);
++            throw new IllegalStateException("GL shader failed: " + reason);
++        }
++        return shader;
++    }
++
++    private static int makeProgram(String vertex, String fragment) {
++        int vert = compileShader(GLES20.GL_VERTEX_SHADER, vertex);
++        int frag = compileShader(GLES20.GL_FRAGMENT_SHADER, fragment);
++        int program = GLES20.glCreateProgram();
++        GLES20.glAttachShader(program, vert);
++        GLES20.glAttachShader(program, frag);
++        GLES20.glLinkProgram(program);
++        GLES20.glDeleteShader(vert);
++        GLES20.glDeleteShader(frag);
++        int[] status = new int[1];
++        GLES20.glGetProgramiv(program, GLES20.GL_LINK_STATUS, status, 0);
++        if (status[0] == 0) {
++            String reason = GLES20.glGetProgramInfoLog(program);
++            GLES20.glDeleteProgram(program);
++            throw new IllegalStateException("GL program failed: " + reason);
++        }
++        return program;
++    }
++
++    private void teardown() {
++        if (mTexture != null) {
++            mTexture.setOnFrameAvailableListener(null);
++        }
++        if (mCodec != null) {
++            try { mCodec.stop(); } catch (RuntimeException ignored) { }
++            try { mCodec.release(); } catch (RuntimeException ignored) { }
++            mCodec = null;
++        }
++        if (mEglDisplay != EGL14.EGL_NO_DISPLAY) {
++            if (mEglContext != EGL14.EGL_NO_CONTEXT && mPbuffer != EGL14.EGL_NO_SURFACE) {
++                try { makeCurrent(mPbuffer); } catch (RuntimeException ignored) { }
++            }
++            if (mPreviewWindow != EGL14.EGL_NO_SURFACE)
++                EGL14.eglDestroySurface(mEglDisplay, mPreviewWindow);
++            if (mEncoderWindow != EGL14.EGL_NO_SURFACE)
++                EGL14.eglDestroySurface(mEglDisplay, mEncoderWindow);
++            if (mPbuffer != EGL14.EGL_NO_SURFACE)
++                EGL14.eglDestroySurface(mEglDisplay, mPbuffer);
++            EGL14.eglMakeCurrent(mEglDisplay, EGL14.EGL_NO_SURFACE,
++                    EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
++            if (mEglContext != EGL14.EGL_NO_CONTEXT)
++                EGL14.eglDestroyContext(mEglDisplay, mEglContext);
++            EGL14.eglTerminate(mEglDisplay);
++            mEglDisplay = EGL14.EGL_NO_DISPLAY;
++        }
++        if (mTexture != null) { mTexture.release(); mTexture = null; }
++        if (mCaptureSurface != null) { mCaptureSurface.release(); mCaptureSurface = null; }
++        if (mEncoderInput != null) { mEncoderInput.release(); mEncoderInput = null; }
++        mPreviewSurface = null;
++        mPreviewWindow = EGL14.EGL_NO_SURFACE;
++        mEncoderWindow = EGL14.EGL_NO_SURFACE;
++        mPbuffer = EGL14.EGL_NO_SURFACE;
++        mEglContext = EGL14.EGL_NO_CONTEXT;
++    }
++}
+diff --git a/DirectRenderingCluster/src/android/car/cluster/ArdaProjectionRoutingPolicy.java b/DirectRenderingCluster/src/android/car/cluster/ArdaProjectionRoutingPolicy.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3041a952f9f866fbe8276b687e4f03a1a1165792
+--- /dev/null
++++ b/DirectRenderingCluster/src/android/car/cluster/ArdaProjectionRoutingPolicy.java
+@@ -0,0 +1,65 @@
++package android.car.cluster;
++
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.Map;
++
++/** Pure protocol-state policy; display ids here are AAP service-discovery ids, NOT Android ids. */
++public final class ArdaProjectionRoutingPolicy {
++    public enum Type { MAIN, CLUSTER, AUXILIARY }
++    public enum Target { AAOS_MAIN, CLUSTER_MAP_VIEWPORT, AUX_MAP_VIEWPORT, UNMAPPED }
++
++    public static final class Route {
++        public final int serviceDisplayId;
++        public final Type type;
++        public final Target target;
++        private Route(int id, Type type, Target target) {
++            this.serviceDisplayId = id;
++            this.type = type;
++            this.target = target;
++        }
++    }
++
++    private final Map<Integer, Route> mRoutes = new HashMap<>();
++    private boolean mAuxMapAllowed;
++
++    /** AUX never hijacks the cluster by default; Platform must explicitly configure a map target. */
++    public void allowAuxMap(boolean enabled) {
++        mAuxMapAllowed = enabled;
++        for (Map.Entry<Integer, Route> e : mRoutes.entrySet()) {
++            if (e.getValue().type == Type.AUXILIARY) {
++                e.setValue(new Route(e.getKey(), Type.AUXILIARY,
++                        enabled ? Target.AUX_MAP_VIEWPORT : Target.UNMAPPED));
++            }
++        }
++    }
++
++    public Route advertise(int aapDisplayId, Type type) {
++        if (type == null || aapDisplayId < 0) throw new IllegalArgumentException("Invalid stream");
++        Route existing = mRoutes.get(aapDisplayId);
++        if (existing != null && existing.type != type) {
++            throw new IllegalStateException("AAP display id reused with different type");
++        }
++        if (existing != null) return existing;
++        if (type == Type.MAIN || type == Type.CLUSTER) {
++            for (Route route : mRoutes.values()) {
++                if (route.type == type) throw new IllegalStateException("Duplicate " + type);
++            }
++        }
++        Target target;
++        switch (type) {
++            case MAIN: target = Target.AAOS_MAIN; break;
++            case CLUSTER: target = Target.CLUSTER_MAP_VIEWPORT; break;
++            default: target = mAuxMapAllowed ? Target.AUX_MAP_VIEWPORT : Target.UNMAPPED;
++        }
++        Route result = new Route(aapDisplayId, type, target);
++        mRoutes.put(aapDisplayId, result);
++        return result;
++    }
++
++    public void remove(int aapDisplayId) { mRoutes.remove(aapDisplayId); }
++    public void disconnect() { mRoutes.clear(); }
++    public Map<Integer, Route> snapshot() {
++        return Collections.unmodifiableMap(new HashMap<>(mRoutes));
++    }
++}
+diff --git a/DirectRenderingCluster/src/android/car/cluster/ArdaProjectionSurface.java b/DirectRenderingCluster/src/android/car/cluster/ArdaProjectionSurface.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..481400a237e1f1e22820681e915edc392ef278cf
+--- /dev/null
++++ b/DirectRenderingCluster/src/android/car/cluster/ArdaProjectionSurface.java
+@@ -0,0 +1,138 @@
++package android.car.cluster;
++
++import android.app.Activity;
++import android.graphics.Rect;
++import android.os.Looper;
++import android.view.Gravity;
++import android.view.Surface;
++import android.view.SurfaceHolder;
++import android.view.SurfaceView;
++import android.view.View;
++import android.view.ViewGroup;
++import android.widget.FrameLayout;
++
++/**
++ * Activity-owned video viewport for a negotiated projection CLUSTER stream.
++ * Not tied to NavigationFragment, a virtual display, or a SurfaceFlinger display id.
++ * This version is deliberately dormant; no video is shown until a trusted in-process
++ * controller explicitly calls showInViewport(). It does NOT expose an IPC endpoint.
++ */
++public final class ArdaProjectionSurface implements SurfaceHolder.Callback {
++    public interface Listener {
++        void onSurfaceReady(Surface surface, int width, int height, long generation);
++        void onSurfaceGone(long generation);
++    }
++
++    private final FrameLayout mRoot;
++    private final FrameLayout mContainer;
++    private final SurfaceView mVideoView;
++    private Listener mListener;
++    private long mGeneration;
++    private boolean mReady;
++    private boolean mReleased;
++
++    public ArdaProjectionSurface(Activity activity) {
++        requireMainThread();
++        mRoot = activity.findViewById(android.R.id.content);
++        if (mRoot == null) {
++            throw new IllegalStateException("No Android activity content root");
++        }
++        mContainer = new FrameLayout(activity);
++        mContainer.setVisibility(View.GONE);
++        mContainer.setFocusable(false);
++        mContainer.setClickable(false);
++        mContainer.setContentDescription("ARDA projection viewport (inactive)");
++        FrameLayout.LayoutParams full = new FrameLayout.LayoutParams(
++                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
++        mRoot.addView(mContainer, full);
++
++        mVideoView = new SurfaceView(activity);
++        mVideoView.setZOrderMediaOverlay(true);
++        mVideoView.setClickable(false);
++        mVideoView.setFocusable(false);
++        mVideoView.getHolder().addCallback(this);
++        mContainer.addView(mVideoView, new FrameLayout.LayoutParams(
++                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
++    }
++
++    private static void requireMainThread() {
++        if (Looper.myLooper() != Looper.getMainLooper()) {
++            throw new IllegalStateException("Projection viewport must be managed on main thread");
++        }
++    }
++
++    public void setListener(Listener listener) {
++        requireMainThread();
++        checkActive();
++        mListener = listener;
++        SurfaceHolder holder = mVideoView.getHolder();
++        if (listener != null && mReady && holder.getSurface().isValid()) {
++            listener.onSurfaceReady(holder.getSurface(), mVideoView.getWidth(),
++                    mVideoView.getHeight(), mGeneration);
++        }
++    }
++
++    /** Rect coordinates are relative to the cluster Activity content root. */
++    public void showInViewport(Rect viewport) {
++        requireMainThread();
++        checkActive();
++        if (viewport == null || viewport.isEmpty()
++                || viewport.left < 0 || viewport.top < 0
++                || viewport.right > mRoot.getWidth()
++                || viewport.bottom > mRoot.getHeight()) {
++            throw new IllegalArgumentException("Invalid or not-yet-laid-out viewport");
++        }
++        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
++                viewport.width(), viewport.height(), Gravity.TOP | Gravity.LEFT);
++        params.leftMargin = viewport.left;
++        params.topMargin = viewport.top;
++        mContainer.setLayoutParams(params);
++        mContainer.setVisibility(View.VISIBLE);
++    }
++
++    /** Hides the video safely without modifying the local cluster or the map virtual display. */
++    public void hide() {
++        requireMainThread();
++        if (!mReleased) mContainer.setVisibility(View.GONE);
++    }
++
++    @Override
++    public void surfaceCreated(SurfaceHolder holder) {
++        // Width/height are reported only after surfaceChanged().
++    }
++
++    @Override
++    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
++        if (mReleased) return;
++        mReady = true;
++        mGeneration++;
++        if (mListener != null && holder.getSurface().isValid()) {
++            mListener.onSurfaceReady(holder.getSurface(), width, height, mGeneration);
++        }
++    }
++
++    @Override
++    public void surfaceDestroyed(SurfaceHolder holder) {
++        if (!mReady) return;
++        mReady = false;
++        mGeneration++;
++        if (mListener != null) mListener.onSurfaceGone(mGeneration);
++    }
++
++    public void release() {
++        requireMainThread();
++        if (mReleased) return;
++        hide();
++        mReleased = true;
++        mReady = false;
++        mGeneration++;
++        if (mListener != null) mListener.onSurfaceGone(mGeneration);
++        mListener = null;
++        mVideoView.getHolder().removeCallback(this);
++        mRoot.removeView(mContainer);
++    }
++
++    private void checkActive() {
++        if (mReleased) throw new IllegalStateException("Projection viewport released");
++    }
++}
+diff --git a/DirectRenderingCluster/src/android/car/cluster/MainClusterActivity.java b/DirectRenderingCluster/src/android/car/cluster/MainClusterActivity.java
+index 591cad6bcd49f2eb29c44febb7af0390dc2ae038..1a03b67ab3748866b20854ec76e6c883a6cdc288 100644
+--- a/DirectRenderingCluster/src/android/car/cluster/MainClusterActivity.java
++++ b/DirectRenderingCluster/src/android/car/cluster/MainClusterActivity.java
+@@ -32,6 +32,8 @@ import android.content.ActivityNotFoundException;
+ import android.content.BroadcastReceiver;
+ import android.content.ComponentName;
+ import android.content.Context;
++import android.database.ContentObserver;
++import android.provider.Settings;
+ import android.content.Intent;
+ import android.content.IntentFilter;
+ import android.content.ServiceConnection;
+@@ -41,11 +43,13 @@ import android.content.pm.ResolveInfo;
+ import android.graphics.Rect;
+ import android.os.Bundle;
+ import android.os.Handler;
++import android.os.SystemProperties;
+ import android.os.IBinder;
+ import android.os.UserHandle;
+ import android.util.Log;
+ import android.util.SparseArray;
+ import android.view.Display;
++import android.view.Surface;
+ import android.view.InputDevice;
+ import android.view.KeyEvent;
+ import android.view.View;
+@@ -89,8 +93,26 @@ import java.util.Map;
+  */
+ public class MainClusterActivity extends FragmentActivity implements
+         ClusterRenderingService.ServiceClient {
++    private ArdaProjectionSurface mArdaProjectionSurface;
++    private ArdaNavigationDisplayKeeper mArdaNavKeeper;
+     private static final String TAG = "Cluster.MainActivity";
+ 
++    // ARDA_V40_1_FREE_MAP_MODE: shared Settings.Global preference, default=stock.
++    private static final String ARDA_MAP_MODE_SETTING = "arda_cluster_free_map_mode";
++    private static final String ARDA_MAP_MODE_DEFAULT = "default";
++    private static final String ARDA_MAP_MODE_CLUSTER = "cluster";
++    private static final String ARDA_MAP_MODE_LAUNCHER = "launcher";
++    private static final long ARDA_MAP_LOADING_TIMEOUT_MS = 15000L;
++    private static final ComponentName ARDA_EMBEDDED_MAP = new ComponentName(
++            "com.google.android.apps.maps",
++            "com.google.android.apps.gmm.car.embedded.auxiliarymap.EmbeddedClusterActivity");
++    private static final ComponentName[] ARDA_LIMITED_MAPS = new ComponentName[] {
++            new ComponentName("com.google.android.apps.maps",
++                    "com.google.android.apps.gmm.car.embedded.activity.LimitedMapsActivity"),
++            new ComponentName("com.google.android.apps.maps",
++                    "com.google.android.maps.LimitedMapsActivity")
++    };
++
+     private static final int NAV_FACET_ID = 0;
+     private static final int COMMS_FACET_ID = 1;
+     private static final int MEDIA_FACET_ID = 2;
+@@ -118,6 +140,38 @@ public class MainClusterActivity extends FragmentActivity implements
+     private final UserReceiver mUserReceiver = new UserReceiver();
+     private ActivityMonitor mActivityMonitor = new ActivityMonitor();
+     private final Handler mHandler = new Handler();
++    private String mArdaMapMode = ARDA_MAP_MODE_DEFAULT;
++    private boolean mArdaMapFallback = false;
++    private final Runnable mArdaMapTimeout = () -> {
++        if (mArdaMapFallback || ARDA_MAP_MODE_DEFAULT.equals(mArdaMapMode)
++                || mClusterViewModel == null || mService == null
++                || Boolean.TRUE.equals(mClusterViewModel.getNavigationFocus().getValue())) {
++            return;
++        }
++        if (mClusterViewModel.getNavigationActivityState().getValue()
++                == ClusterViewModel.NavigationActivityState.LOADING) {
++            mArdaMapFallback = true;
++            Log.w(TAG, "ARDA_V40_1_MAP_FALLBACK mode=" + mArdaMapMode);
++            tryLaunchNavigationActivity();
++        }
++    };
++    private final ContentObserver mArdaMapModeObserver = new ContentObserver(mHandler) {
++        @Override
++        public void onChange(boolean selfChange) {
++            String next = ardaGetMapMode();
++            if (next.equals(mArdaMapMode)) return;
++            mArdaMapMode = next;
++            mArdaMapFallback = false;
++            mHandler.removeCallbacks(mArdaMapTimeout);
++            Log.i(TAG, "ARDA_V40_1_MAP_MODE_CHANGED=" + next);
++            // Keep any active navigation-focus owner's Activity untouched.
++            if (mClusterViewModel != null && mService != null
++                    && mNavigationDisplay.mDisplayId != NO_DISPLAY
++                    && !Boolean.TRUE.equals(mClusterViewModel.getNavigationFocus().getValue())) {
++                tryLaunchNavigationActivity();
++            }
++        }
++    };
+     private final Runnable mRetryLaunchNavigationActivity = this::tryLaunchNavigationActivity;
+     private VirtualDisplay mNavigationDisplay = new VirtualDisplay(NO_DISPLAY, null);
+ 
+@@ -158,6 +212,9 @@ public class MainClusterActivity extends FragmentActivity implements
+             if (mPendingVirtualDisplay != null) {
+                 // If haven't reported the virtual display yet, do so on service connect.
+                 reportNavDisplay(mPendingVirtualDisplay);
++                if (mArdaNavKeeper != null) {
++                    tryLaunchNavigationActivity();
++                }
+                 mPendingVirtualDisplay = null;
+             }
+         }
+@@ -231,6 +288,18 @@ public class MainClusterActivity extends FragmentActivity implements
+         super.onCreate(savedInstanceState);
+         Log.d(TAG, "onCreate");
+         setContentView(R.layout.activity_main);
++        // ARDA V23: activity-owned viewport; dormant until AAP bridge is validated.
++        mArdaProjectionSurface = new ArdaProjectionSurface(this);
++        // Opt-in V30 canary. Default off: unchanged production navigation behavior.
++        if (SystemProperties.getBoolean("persist.arda.cluster.nav_keeper", false)) {
++            try {
++                mArdaNavKeeper = new ArdaNavigationDisplayKeeper(this);
++                Log.i(TAG, "ARDA navigation map Surface keeper canary enabled");
++            } catch (RuntimeException ex) {
++                Log.e(TAG, "Unable to initialize map Surface keeper", ex);
++                mArdaNavKeeper = null;
++            }
++        }
+ 
+         mInputMethodManager = getSystemService(InputMethodManager.class);
+ 
+@@ -265,6 +334,10 @@ public class MainClusterActivity extends FragmentActivity implements
+         registerReceiver(mUserPresentReceiver, userPresentFilter);
+ 
+         mClusterViewModel = new ViewModelProvider(this).get(ClusterViewModel.class);
++        mArdaMapMode = ardaGetMapMode();
++        getContentResolver().registerContentObserver(
++                Settings.Global.getUriFor(ARDA_MAP_MODE_SETTING), false, mArdaMapModeObserver);
++        Log.i(TAG, "ARDA_V40_1_MAP_MODE_INIT=" + mArdaMapMode);
+         mClusterViewModel.getNavigationFocus().observe(this, focus -> {
+             if (!focus) {
+                 mNavStateController.update(null);
+@@ -272,11 +345,16 @@ public class MainClusterActivity extends FragmentActivity implements
+         });
+         mClusterViewModel.getNavigationActivityState().observe(this, state -> {
+             if (state == ClusterViewModel.NavigationActivityState.LOADING) {
++                if (!ARDA_MAP_MODE_DEFAULT.equals(mArdaMapMode) && !mArdaMapFallback
++                        && !mHandler.hasCallbacks(mArdaMapTimeout)) {
++                    mHandler.postDelayed(mArdaMapTimeout, ARDA_MAP_LOADING_TIMEOUT_MS);
++                }
+                 if (!mHandler.hasCallbacks(mRetryLaunchNavigationActivity)) {
+                     mHandler.postDelayed(mRetryLaunchNavigationActivity,
+                             NAVIGATION_ACTIVITY_RELAUNCH_DELAY_MS);
+                 }
+             } else {
++                mHandler.removeCallbacks(mArdaMapTimeout);
+                 mHandler.removeCallbacks(mRetryLaunchNavigationActivity);
+             }
+         });
+@@ -334,6 +412,14 @@ public class MainClusterActivity extends FragmentActivity implements
+ 
+     @Override
+     protected void onDestroy() {
++        if (mArdaNavKeeper != null) {
++            mArdaNavKeeper.release();
++            mArdaNavKeeper = null;
++        }
++        if (mArdaProjectionSurface != null) {
++            mArdaProjectionSurface.release();
++            mArdaProjectionSurface = null;
++        }
+         super.onDestroy();
+         Log.d(TAG, "onDestroy");
+         mUserReceiver.unregister(this);
+@@ -345,6 +431,8 @@ public class MainClusterActivity extends FragmentActivity implements
+         unbindService(mClusterRenderingServiceConnection);
+         unregisterReceiver(mScreenOffReceiver);
+         unregisterReceiver(mUserPresentReceiver);
++        mHandler.removeCallbacks(mArdaMapTimeout);
++        getContentResolver().unregisterContentObserver(mArdaMapModeObserver);
+     }
+ 
+     @Override
+@@ -366,6 +454,23 @@ public class MainClusterActivity extends FragmentActivity implements
+         }
+     }
+ 
++    /** V30 canary gate; disabled unless explicitly provisioned at process start. */
++    boolean ardaNavKeeperEnabled() {
++        return mArdaNavKeeper != null;
++    }
++
++    void ardaAttachNavSurface(Surface surface, int width, int height, Rect unobscuredBounds) {
++        if (mArdaNavKeeper != null) {
++            mArdaNavKeeper.attach(surface, width, height, unobscuredBounds);
++        }
++    }
++
++    void ardaDetachNavSurface(Surface surface) {
++        if (mArdaNavKeeper != null) {
++            mArdaNavKeeper.detach(surface);
++        }
++    }
++
+     public void updateNavDisplay(VirtualDisplay virtualDisplay) {
+         // Starting the default navigation activity. This activity will be shown when navigation
+         // focus is not taken.
+@@ -458,7 +563,7 @@ public class MainClusterActivity extends FragmentActivity implements
+         }
+         mHandler.removeCallbacks(mRetryLaunchNavigationActivity);
+ 
+-        ActivityInfo activityInfo = getNavigationActivity(this);
++        ActivityInfo activityInfo = getArdaNavigationActivity();
+         ComponentName navigationActivity = new ComponentName(activityInfo.packageName,
+                 activityInfo.name);
+         int userId = (activityInfo.flags & ActivityInfo.FLAG_SHOW_FOR_ALL_USERS) != 0
+@@ -495,6 +600,78 @@ public class MainClusterActivity extends FragmentActivity implements
+      * file (which OEMs can overlay).
+      * When it fails to find, parse or resolve the activity, it'll throw ActivityNotFoundException.
+      */
++    // Default-off, no HDMI1 TaskView reparenting. Different Maps component, same map app.
++    private String ardaGetMapMode() {
++        String raw = Settings.Global.getString(getContentResolver(), ARDA_MAP_MODE_SETTING);
++        if (ARDA_MAP_MODE_CLUSTER.equals(raw) || ARDA_MAP_MODE_LAUNCHER.equals(raw)) {
++            return raw;
++        }
++        return ARDA_MAP_MODE_DEFAULT;
++    }
++
++    private ActivityInfo ardaResolveUserActivity(Context context, ComponentName component) {
++        try {
++            Context driver = context.createContextAsUser(
++                    UserHandle.of(ActivityManager.getCurrentUser()), 0);
++            ActivityInfo info = driver.getPackageManager().getActivityInfo(component, 0);
++            return (info.enabled && info.applicationInfo != null
++                    && info.applicationInfo.enabled) ? info : null;
++        } catch (PackageManager.NameNotFoundException | SecurityException ex) {
++            Log.w(TAG, "ARDA_V40_1_ACTIVITY_UNAVAILABLE=" + component, ex);
++            return null;
++        }
++    }
++
++    private ActivityInfo getArdaNavigationActivity() {
++        if (mArdaMapFallback || ARDA_MAP_MODE_DEFAULT.equals(mArdaMapMode)) {
++            return getNavigationActivity(this);
++        }
++        if (ARDA_MAP_MODE_CLUSTER.equals(mArdaMapMode)) {
++            ActivityInfo candidate = ardaResolveUserActivity(this, ARDA_EMBEDDED_MAP);
++            if (candidate != null) {
++                Log.i(TAG, "ARDA_V40_1_SELECTED=embedded_cluster");
++                return candidate;
++            }
++        } else if (ARDA_MAP_MODE_LAUNCHER.equals(mArdaMapMode)) {
++            // Mirror the Launcher small-canvas intent *selection*, not its actual TaskView.
++            // Never launch MapsActivity, which may steal the running HDMI1 task.
++            try {
++                Context driver = createContextAsUser(
++                        UserHandle.of(ActivityManager.getCurrentUser()), 0);
++                Context launcher = driver.createPackageContext("com.android.car.carlauncher", 0);
++                int id = launcher.getResources().getIdentifier(
++                        "config_smallCanvasOptimizedMapIntent", "string",
++                        "com.android.car.carlauncher");
++                if (id != 0) {
++                    String uri = launcher.getString(id);
++                    if (!uri.isEmpty()) {
++                        Intent mapIntent = Intent.parseUri(uri, Intent.URI_INTENT_SCHEME);
++                        ComponentName component = mapIntent.getComponent();
++                        if (component != null && component.getClassName().contains("LimitedMaps")) {
++                            ActivityInfo candidate = ardaResolveUserActivity(this, component);
++                            if (candidate != null) {
++                                Log.i(TAG, "ARDA_V40_1_SELECTED=launcher_small_canvas");
++                                return candidate;
++                            }
++                        }
++                    }
++                }
++            } catch (Exception ex) {
++                Log.w(TAG, "ARDA_V40_1_SMALL_CANVAS_INTENT_UNAVAILABLE", ex);
++            }
++            for (ComponentName candidateName : ARDA_LIMITED_MAPS) {
++                ActivityInfo candidate = ardaResolveUserActivity(this, candidateName);
++                if (candidate != null) {
++                    Log.i(TAG, "ARDA_V40_1_SELECTED=limited_maps " + candidateName);
++                    return candidate;
++                }
++            }
++        }
++        // Fail closed: unresolved special mode cannot displace the HDMI1 Maps task.
++        Log.w(TAG, "ARDA_V40_1_NO_SAFE_MAP_ACTIVITY; using stock placeholder");
++        return getNavigationActivity(this);
++    }
++
+     static @NonNull ActivityInfo getNavigationActivity(Context context) {
+         PackageManager pm = context.getPackageManager();
+         String intentString = context.getString(R.string.freeNavigationIntent);
+diff --git a/DirectRenderingCluster/src/android/car/cluster/NavigationFragment.java b/DirectRenderingCluster/src/android/car/cluster/NavigationFragment.java
+index 3bdbfcfb30f5f062215655c221d89b69b11dd0d2..71a31f3282ef7ca1f54cfc1de4b9c4c07b0b9634 100644
+--- a/DirectRenderingCluster/src/android/car/cluster/NavigationFragment.java
++++ b/DirectRenderingCluster/src/android/car/cluster/NavigationFragment.java
+@@ -22,6 +22,8 @@ import android.hardware.display.DisplayManager.DisplayListener;
+ import android.hardware.display.VirtualDisplay;
+ import android.os.Bundle;
+ import android.os.Handler;
++import android.provider.Settings;
++import android.content.res.Configuration;
+ import android.util.Log;
+ import android.view.Display;
+ import android.view.LayoutInflater;
+@@ -127,6 +129,19 @@ public class NavigationFragment extends Fragment {
+         View root = inflater.inflate(R.layout.fragment_navigation, container, false);
+ 
+         mSurfaceView = root.findViewById(R.id.nav_surface);
++        // ARDA_V42_CLUSTER_MAP_TOUCH: physical HDMI2 preview only, default disabled.
++        // Does NOT change Google Maps' own UI mode or inject events into Cluster-App-VD.
++        mSurfaceView.setClickable(true);
++        mSurfaceView.setOnTouchListener((v, event) -> !ardaMapTouchAllowed());
++        root.setClickable(true);
++        root.setOnTouchListener((v, event) -> !ardaMapTouchAllowed());
++        String theme = Settings.Global.getString(requireActivity().getContentResolver(),
++                "arda_cluster_map_theme");
++        int systemNight = getResources().getConfiguration().uiMode
++                & Configuration.UI_MODE_NIGHT_MASK;
++        Log.i(TAG, "ARDA_V42_MAP_THEME_REQUEST=" + (theme == null ? "vehicle" : theme)
++                + " SYSTEM_NIGHT=" + (systemNight == Configuration.UI_MODE_NIGHT_YES)
++                + " GOOGLE_MAPS_THEME_OVERRIDE=NOT_SUPPORTED");
+         mSurfaceView.getHolder().addCallback(new Callback() {
+             @Override
+             public void surfaceCreated(SurfaceHolder holder) {
+@@ -150,6 +165,13 @@ public class NavigationFragment extends Fragment {
+                         height - obscuredHeight /* bottom: size of display - gradient */
+                 );
+ 
++                if (mMainClusterActivity != null
++                        && mMainClusterActivity.ardaNavKeeperEnabled()) {
++                    // V30: Keep the same navigation display alive beyond this tab's Surface.
++                    mMainClusterActivity.ardaAttachNavSurface(holder.getSurface(), width,
++                            height, mUnobscuredBounds);
++                    return;
++                }
+                 if (mVirtualDisplay == null) {
+                     mVirtualDisplay = createVirtualDisplay(holder.getSurface(), width, height);
+                 } else {
+@@ -161,8 +183,13 @@ public class NavigationFragment extends Fragment {
+             public void surfaceDestroyed(SurfaceHolder holder) {
+                 Log.i(TAG, "surfaceDestroyed, holder: " + holder + ", detaching surface from"
+                         + " display, surface: " + holder.getSurface());
+-                // detaching surface is similar to turning off the display
+-                mVirtualDisplay.setSurface(null);
++                if (mMainClusterActivity != null
++                        && mMainClusterActivity.ardaNavKeeperEnabled()) {
++                    mMainClusterActivity.ardaDetachNavSurface(holder.getSurface());
++                    return;
++                }
++                // Original AOSP behavior if canary is disabled.
++                if (mVirtualDisplay != null) mVirtualDisplay.setSurface(null);
+             }
+         });
+         mProgressBar = root.findViewById(R.id.progress_bar);
+@@ -181,6 +208,12 @@ public class NavigationFragment extends Fragment {
+         return root;
+     }
+ 
++    private boolean ardaMapTouchAllowed() {
++        // Disabled by default. Settings.Global can change without recreating this fragment.
++        return "on".equals(Settings.Global.getString(
++                requireActivity().getContentResolver(), "arda_cluster_map_touch"));
++    }
++
+     private VirtualDisplay createVirtualDisplay(Surface surface, int width, int height) {
+         Log.i(TAG, "createVirtualDisplay, surface: " + surface + ", width: " + width
+                 + "x" + height);
+@@ -188,6 +221,16 @@ public class NavigationFragment extends Fragment {
+                 DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY);
+     }
+ 
++    @Override
++    public void onDestroyView() {
++        // Tab switches can destroy the View before SurfaceHolder's callback arrives.
++        if (mMainClusterActivity != null && mMainClusterActivity.ardaNavKeeperEnabled()
++                && mSurfaceView != null) {
++            mMainClusterActivity.ardaDetachNavSurface(mSurfaceView.getHolder().getSurface());
++        }
++        super.onDestroyView();
++    }
++
+     @Override
+     public void onDestroy() {
+         super.onDestroy();

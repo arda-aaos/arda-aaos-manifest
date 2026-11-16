@@ -1,0 +1,38 @@
+{
+  "release": "2026-11-16-v49.7",
+  "strategy": "upstream source SHAs + exact ARDA patches for shallow AOSP projects",
+  "mac_ardaplatform": {
+    "repo": "Deadknight/ArdaPlatform",
+    "sha": "3b29dabd92b09d444346f94703c1a61a2711b96d",
+    "verified_remote": true
+  },
+  "libudev_zero": {
+    "source": "raspberry-vanilla/android_external_libudev-zero",
+    "base_sha": "6f093b428ecae5138654b61d7f29871cef8739dc",
+    "local_commit_sha": "b80b0efddfed7fcef2659955f0ae8f7bea124a0e",
+    "post_patch_tree": "c06b073f6eeb73b0fc3a6e5d04510133fefc0f31",
+    "patch_sha256": "f5c7aa9442d5c717745799db17b197dc906e8a0f247e1763b8fbbf2347f893c9"
+  },
+  "car_cluster": {
+    "source": "android.googlesource.com/platform/packages/apps/Car/Cluster",
+    "base_sha": "7244742c0268e1a1f6e88f5b2e1df0c0ec2c825a",
+    "local_commit_sha": "381ec76af237a746c48c9b1efa62d58f7b9b246e",
+    "post_patch_tree": "d3ca1c09f243c4f5b25a3350dad0c0fae6f40843",
+    "patch_sha256": "90e753688745c048e0d972166aad7d6e2f591d2d78034889bcb44e150d8c5cff"
+  },
+  "vendor_arda_ardaplatform": {
+    "repo": "Deadknight/android_vendor_arda_ardaplatform",
+    "sha": "f1339bf1294c63a6378e6d344b5177e65c0a3176",
+    "repo_project_name": "android_vendor_arda_ardaplatform"
+  },
+  "aosp_project_count": 1006,
+  "security_note": "Pre-existing GitHub vendor ELF binaries with PEM labels were inventoried against pinned remote main and screened for PEM key-like blocks. No new marker-bearing blobs are permitted. Historical exposure remains unremediated.",
+  "runtime_observed": {
+    "hdmi2_rotation": "lock 3 / physical port 1",
+    "cluster_map": "cluster",
+    "cluster_touch": "off",
+    "cluster_theme": "vehicle",
+    "h264_canary": "0"
+  },
+  "note": "Historical 2026-09-17 release is untouched. This source snapshot is not a standalone image build or a verified reboot-persistent HDMI policy."
+}

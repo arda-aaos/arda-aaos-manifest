@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest>
+  <extend-project name="platform/external/libudev-zero" path="external/libudev-zero" revision="6f093b428ecae5138654b61d7f29871cef8739dc" />
+  <extend-project name="platform/packages/apps/Car/Cluster" path="packages/apps/Car/Cluster" revision="7244742c0268e1a1f6e88f5b2e1df0c0ec2c825a" />
+  <extend-project name="android_vendor_arda_ardaplatform" path="vendor/arda/ardaplatform" revision="f1339bf1294c63a6378e6d344b5177e65c0a3176" />
+</manifest>

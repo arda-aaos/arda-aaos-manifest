@@ -1,0 +1,12 @@
+diff --git a/Android.bp b/Android.bp
+index 1b8c9c68f50ae32312022376b58fb80da7a7d830..76631c6c8b0bec412c78a98b550b159da500c2bc 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -15,6 +15,7 @@ license {
+ 
+ cc_genrule {
+     name: "libudev_zero_copy_headers",
++    vendor_available: true,
+     srcs: ["udev.h"],
+     out: ["libudev.h"],
+     cmd: "cp $(in) $(out)",
