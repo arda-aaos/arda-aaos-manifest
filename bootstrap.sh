@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 TARGET="${1:-$HOME/aosp-rpi-aaos16}"
-RELEASE_REPO_URL="${ARDA_RELEASE_REPO_URL:-https://github.com/Deadknight/arda-aaos-manifest.git}"
+RELEASE_REPO_URL="${ARDA_RELEASE_REPO_URL:-https://github.com/arda-aaos/arda-aaos-manifest.git}"
 RELEASE_REF="${ARDA_RELEASE_REF:-main}"
 
 fail() { echo "FAIL=$1" >&2; exit 2; }

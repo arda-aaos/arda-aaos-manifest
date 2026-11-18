@@ -1,0 +1,50 @@
+{
+  "active_custom_lock_repositories_updated": 14,
+  "active_manifest_sha256": "031b28ac6eaf07e881702e14bd2d8249666141b4ef3b34a2741422a17d477c56",
+  "base_main_sha": "a85ead3d1d0973e73d7ff34a0cd2d1d67f1ceb0f",
+  "baseline_xml_sha256": {
+    "manifests/10-remove_projects.xml": "154e8a794b721f32d3fcf067735ccd0a2605ddcddca166bb7150852d25ddcb59",
+    "manifests/20-manifest_brcm_rpi.xml": "51c252ebb2ab6b34daff856c839f116d967c4bd0c90d93e53aac6d43902fd718",
+    "releases/2026-11-16-v49.7/manifests/30-v49.7-upstream-pins.xml": "37d6decf2417b7836f5aaab2c86d2808fcdb304a3118ad3199da8fd3e5f4f267"
+  },
+  "kind": "ORG_MANIFEST_LOCAL_COMMIT_NOT_PUBLISHED",
+  "local_variant_sha256": "4d733056e2e533f4a83fb48570fe21e9c1c14387e16c9a38a3c3c5fcd2ef4c50",
+  "no_push": true,
+  "not_an_ota_release": true,
+  "not_installed": true,
+  "repository": "arda-aaos/arda-aaos-manifest",
+  "repository_id": 1291398982,
+  "requires_source_push_before_manifest_publish": true,
+  "revision_deltas": [
+    {
+      "active_revision": "f84b258c52b5707755daed93eb5bba36794e72ec",
+      "local_revision": "arda-aaos16",
+      "path": "packages/apps/Car/SystemUI"
+    },
+    {
+      "active_revision": "d2acc9f17be3b3e6991aefb0127ef64feef962bb",
+      "local_revision": "arda-aaos16",
+      "path": "vendor/arda"
+    },
+    {
+      "active_revision": "11066838f7fa3c50002720e816208191e05cf108",
+      "local_revision": "main",
+      "path": "vendor/arda/ardaplatform"
+    }
+  ],
+  "v16_lock_sha256": "30f51cfdc10fcd1e6c1871f6eff01c0d424b4aecd8728206897bd64ddbf9b8d8",
+  "v16_source_local_commits": {
+    "vendor/arda": "8b90ecdbcda524b59e9c31b712e5bad76dfbba7d",
+    "vendor/arda/ardaplatform": "e36e3362286107c6ac731df8714eaae0cd541da4"
+  },
+  "v49_7_file_sha256": {
+    "releases/2026-11-16-v49.7/README.md": "ba3fd50e6a19a658452479af4d545d4357a74063bcf6e1318f8e7608fb678225",
+    "releases/2026-11-16-v49.7/locks/independent-vendor-ardaplatform.sha": "d7a8959a1d8475949a8b4a15f92a6b48f920fea5967342095c427697b70584c9",
+    "releases/2026-11-16-v49.7/locks/source-heads.tsv": "f1e16f203bebd2a4c6886729fd205f69d827858f5430ad5408b761a9a51d232c",
+    "releases/2026-11-16-v49.7/manifests/30-v49.7-upstream-pins.xml": "37d6decf2417b7836f5aaab2c86d2808fcdb304a3118ad3199da8fd3e5f4f267",
+    "releases/2026-11-16-v49.7/metadata/source-pins.json": "f9a5b58effb9241cf7ffa06896d3824eaac61236a6bfdf24caeab440454a7dac",
+    "releases/2026-11-16-v49.7/patches/cluster-v42.patch": "90e753688745c048e0d972166aad7d6e2f591d2d78034889bcb44e150d8c5cff",
+    "releases/2026-11-16-v49.7/patches/libudev-zero.patch": "f5c7aa9442d5c717745799db17b197dc906e8a0f247e1763b8fbbf2347f893c9",
+    "releases/2026-11-16-v49.7/scripts/apply-v49.7.sh": "7c37547a4b2209d34ed0950d9a1c7de4ccfc17747cbba690a07baaf912c8d156"
+  }
+}
