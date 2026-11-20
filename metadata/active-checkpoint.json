@@ -1,0 +1,67 @@
+{
+  "checkpoint": "2026-11-19-org-owner-release",
+  "lock_sha256": "30f51cfdc10fcd1e6c1871f6eff01c0d424b4aecd8728206897bd64ddbf9b8d8",
+  "note": "Metadata only; the legacy bootstrap and historical V49.7 release remain separate until verified end-to-end.",
+  "pinned_manifest": "proposals/2026-11-18-org-migration/manifests/active-pinned-zz_arda.xml",
+  "pinned_manifest_sha256": "031b28ac6eaf07e881702e14bd2d8249666141b4ef3b34a2741422a17d477c56",
+  "projects": {
+    "device/brcm/rpi4": {
+      "in_pinned_xml": true,
+      "revision": "5fedcf315589f95e89852cfc47c38cea04480928"
+    },
+    "device/brcm/rpi5": {
+      "in_pinned_xml": true,
+      "revision": "000153b9cf4b903e12a748a27d421872cd55505e"
+    },
+    "external/drm_hwcomposer": {
+      "in_pinned_xml": false,
+      "revision": "85e7a88dacf4af1783e5e88b42a2c4a6fb109013"
+    },
+    "external/v4l2_codec2": {
+      "in_pinned_xml": true,
+      "revision": "99f85153d805c6ed7aa09fab869a965ce4c65b43"
+    },
+    "frameworks/av": {
+      "in_pinned_xml": false,
+      "revision": "43f12cbd16344fa660cb1a80da3cd69af946bf32"
+    },
+    "frameworks/native": {
+      "in_pinned_xml": false,
+      "revision": "417e0d7199c7a4c01834f3f9adf5f379cbaea372"
+    },
+    "packages/apps/Car/Launcher": {
+      "in_pinned_xml": false,
+      "revision": "bcf9edaf3544f3cc1aa618ad7f8013d49961c77a"
+    },
+    "packages/apps/Car/Media": {
+      "in_pinned_xml": false,
+      "revision": "f48f17d8c19937b17b4bffa43579bea30d5058e5"
+    },
+    "packages/apps/Car/MediaPrebuilt": {
+      "in_pinned_xml": false,
+      "revision": "9339f974018c3fc5b9454b16f0a5019b60da7de8"
+    },
+    "packages/apps/Car/SystemUI": {
+      "in_pinned_xml": true,
+      "revision": "f84b258c52b5707755daed93eb5bba36794e72ec"
+    },
+    "system/sepolicy": {
+      "in_pinned_xml": true,
+      "revision": "a5a0f70b11c4c002c7458623b33cb781e41c0c2d"
+    },
+    "vendor/arda": {
+      "in_pinned_xml": true,
+      "revision": "8b90ecdbcda524b59e9c31b712e5bad76dfbba7d"
+    },
+    "vendor/arda/ardaplatform": {
+      "in_pinned_xml": true,
+      "revision": "e36e3362286107c6ac731df8714eaae0cd541da4"
+    },
+    "vendor/arda/proprietary": {
+      "in_pinned_xml": true,
+      "revision": "5e49784ec611bee0ae10cafd156debb77c12cbee"
+    }
+  },
+  "schema": 1,
+  "source": "locks/custom-repos.tsv"
+}
