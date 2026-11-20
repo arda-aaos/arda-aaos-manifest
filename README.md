@@ -1,5 +1,38 @@
 # ARDA AAOS 16 reproducible source release
 
+<!-- ARDA_COMMUNITY_MANUAL_REPO_V3_START -->
+## Downloading ARDA source code
+
+For most users, choose a verified prebuilt image (when an officially redistributable image is available) instead of building Android from scratch.
+
+**Public components only:** ARDA Community Setup can download 12 public, SHA-pinned ARDA repositories without a full Android tree. This is not a complete operating-system build.
+
+**Manual Android `repo` workflow (developer preview):**
+
+```bash
+# Ubuntu: an empty, NEW directory only
+mkdir -p ~/arda-aaos16-manual && cd ~/arda-aaos16-manual
+repo init -u https://android.googlesource.com/platform/manifest \
+  -b android-16.0.0_r4 --partial-clone
+
+git clone https://github.com/arda-aaos/arda-aaos-manifest.git ~/arda-aaos-manifest
+mkdir -p .repo/local_manifests
+cp ~/arda-aaos-manifest/manifests/10-remove_projects.xml .repo/local_manifests/10-remove_projects.xml
+cp ~/arda-aaos-manifest/manifests/20-manifest_brcm_rpi.xml .repo/local_manifests/20-manifest_brcm_rpi.xml
+cp ~/arda-aaos-manifest/proposals/2026-11-18-org-migration/manifests/active-pinned-zz_arda.xml .repo/local_manifests/30-arda-pinned.xml
+repo manifest -o ~/arda-manifest-expanded.xml
+# Read the expanded manifest and confirm access to private repositories BEFORE:
+# repo sync -c -j4 --fail-fast
+```
+
+This uses an **example Android 16 base tag**, not a fully validated ARDA full-source checkpoint. `vendor/arda/proprietary` and `packages/apps/Car/MediaPrebuilt` remain private dependencies. `repo sync` is intentionally commented out; it is for a new checkout only, after verifying manifests, licenses and access. The legacy ARDA bootstrap verification metadata also requires reconciliation before it can be advertised as a reproducible, one-command full build.
+
+The source migration manifest checkpoint is [`abd70aac`](https://github.com/arda-aaos/arda-aaos-manifest/commit/abd70aacb1478e57aeac52089ac6d183dc52a928). This is source provenance, **not** proof that every released image was built from this commit.
+
+[Android `repo` reference](https://source.android.com/docs/setup/reference/repo) · [ARDA releases](https://github.com/arda-aaos/arda-releases/releases) · [ARDA CLI](https://github.com/arda-aaos/arda-cli)
+<!-- ARDA_COMMUNITY_MANUAL_REPO_V3_END -->
+
+
 This repository reproduces the audited ARDA AAOS 16 source state frozen on **2026-09-17**.
 
 The release intentionally separates the immutable upstream/Raspberry source lock
